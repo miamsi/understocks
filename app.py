@@ -3,9 +3,6 @@ import pandas as pd
 import yfinance as yf
 from supabase import create_client, Client
 import time
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 from datetime import datetime, timedelta
 
 # ==========================================
@@ -27,7 +24,7 @@ def init_connection() -> Client:
 supabase = init_connection()
 
 # ==========================================
-# FILE LOADER (FIXED XLSX + CSV SUPPORT)
+# FILE LOADER (CSV + XLSX)
 # ==========================================
 def load_file(uploaded_file):
     if uploaded_file.name.endswith(".csv"):
@@ -35,60 +32,57 @@ def load_file(uploaded_file):
     elif uploaded_file.name.endswith(".xlsx"):
         return pd.read_excel(uploaded_file, engine="openpyxl")
     else:
-        st.error("Unsupported file format. Use CSV or XLSX.")
+        st.error("Unsupported file format")
         st.stop()
 
 # ==========================================
-# ROBUST TICKER COLUMN DETECTION (FIXED)
+# DETECT TICKER COLUMN (ROBUST)
 # ==========================================
 def detect_ticker_column(df):
-    possible_names = ["kode", "ticker", "symbol", "code"]
-
+    possible = ["kode", "ticker", "symbol", "code"]
     for col in df.columns:
-        for key in possible_names:
+        for key in possible:
             if key in col.lower():
                 return col
-
     return None
 
 # ==========================================
-# YFINANCE SESSION
+# SAFE FETCH (FIXED YFINANCE)
 # ==========================================
-def get_yf_session():
-    session = requests.Session()
-    retry = Retry(
-        total=3,
-        backoff_factor=1,
-        status_forcelist=[429, 500, 502, 503, 504]
-    )
-    adapter = HTTPAdapter(max_retries=retry)
-    session.mount("https://", adapter)
-    return session
-
-# ==========================================
-# SAFE FETCH (FIXES YF FAILURES)
-# ==========================================
-def safe_fetch_info(ticker, session):
+def safe_fetch_info(ticker):
     try:
-        stock = yf.Ticker(ticker, session=session)
+        stock = yf.Ticker(ticker)
 
-        info = stock.info
-
-        # fallback if broken
-        if not info or "currentPrice" not in info:
-            fast = stock.fast_info
-            info = {
+        # ✅ PRIMARY (STABLE)
+        fast = stock.fast_info
+        if fast and fast.get("lastPrice"):
+            return {
                 "currentPrice": fast.get("lastPrice"),
-                "marketCap": fast.get("marketCap")
+                "marketCap": fast.get("marketCap"),
+                "source": "fast_info"
             }
 
-        return info
+        # 🔄 FALLBACK
+        info = stock.info
+        if info and ("currentPrice" in info or "regularMarketPrice" in info):
+            return {
+                "currentPrice": info.get("currentPrice") or info.get("regularMarketPrice"),
+                "marketCap": info.get("marketCap"),
+                "sector": info.get("sector"),
+                "longName": info.get("longName"),
+                "trailingPE": info.get("trailingPE"),
+                "priceToBook": info.get("priceToBook"),
+                "debtToEquity": info.get("debtToEquity"),
+                "source": "info"
+            }
 
-    except Exception:
         return None
 
+    except Exception as e:
+        return {"error": str(e)}
+
 # ==========================================
-# DATABASE FETCH
+# FETCH DB
 # ==========================================
 @st.cache_data(ttl=600)
 def fetch_db():
@@ -96,7 +90,7 @@ def fetch_db():
     return pd.DataFrame(res.data)
 
 # ==========================================
-# SMART UPDATE FILTER (KEY FEATURE)
+# SMART FILTER
 # ==========================================
 def filter_tickers_to_update(df_db, tickers):
     now = datetime.now()
@@ -108,7 +102,6 @@ def filter_tickers_to_update(df_db, tickers):
             db_map[row["ticker"]] = row.get("last_updated")
 
     to_update = []
-
     for t in tickers:
         last = db_map.get(t)
 
@@ -125,7 +118,7 @@ def filter_tickers_to_update(df_db, tickers):
     return to_update
 
 # ==========================================
-# UI TABS
+# UI
 # ==========================================
 tab1, tab2 = st.tabs(["📊 Screener", "⚙️ Updater"])
 
@@ -138,15 +131,12 @@ with tab1:
     df = fetch_db()
 
     if df.empty:
-        st.warning("No data available. Please run updater first.")
+        st.warning("No data available. Run updater first.")
     else:
-        # Safe numeric conversion
         df["pe_ratio"] = pd.to_numeric(df["pe_ratio"], errors="coerce")
         df["pb_ratio"] = pd.to_numeric(df["pb_ratio"], errors="coerce")
 
-        # Value score
         df["value_score"] = df["pe_ratio"] * df["pb_ratio"]
-
         df = df.sort_values("value_score")
 
         st.dataframe(df, use_container_width=True)
@@ -163,16 +153,15 @@ with tab2:
     )
 
     batch_size = st.slider("Batch size", 5, 50, 20)
-    sleep_time = st.slider("Delay between requests (sec)", 0.5, 3.0, 1.0)
+    sleep_time = st.slider("Delay (sec)", 0.5, 3.0, 1.5)
 
-    if uploaded_file and st.button("🚀 Start Smart Sync"):
+    if uploaded_file and st.button("🚀 Start Sync"):
 
         raw = load_file(uploaded_file)
 
         ticker_col = detect_ticker_column(raw)
-
         if not ticker_col:
-            st.error("Could not detect ticker column (Kode/Ticker/Symbol)")
+            st.error("Ticker column not found")
             st.stop()
 
         tickers = raw[ticker_col].dropna().astype(str).str.strip().tolist()
@@ -180,16 +169,13 @@ with tab2:
 
         df_db = fetch_db()
 
-        # SMART FILTER
         to_update = filter_tickers_to_update(df_db, yf_tickers)
 
         st.info(f"""
-        Total tickers: {len(yf_tickers)}
+        Total: {len(yf_tickers)}
         Need update: {len(to_update)}
-        Skipped (cached): {len(yf_tickers) - len(to_update)}
+        Skipped: {len(yf_tickers) - len(to_update)}
         """)
-
-        session = get_yf_session()
 
         success, failed = 0, 0
         buffer = []
@@ -201,10 +187,12 @@ with tab2:
 
             status.text(f"Fetching {ticker} ({i+1}/{batch_size})")
 
-            info = safe_fetch_info(ticker, session)
+            info = safe_fetch_info(ticker)
 
-            if not info:
+            # ❌ DEBUG VISIBILITY
+            if not info or "error" in info:
                 failed += 1
+                st.write(f"❌ {ticker} failed:", info)
                 continue
 
             try:
@@ -223,26 +211,27 @@ with tab2:
                 buffer.append(data)
                 success += 1
 
-                # BULK UPSERT
+                # ✅ BULK UPSERT
                 if len(buffer) >= 10:
                     supabase.table("ihsg_stocks").upsert(buffer).execute()
                     buffer = []
 
-            except:
+            except Exception as e:
                 failed += 1
+                st.write(f"DB error {ticker}:", str(e))
 
             progress.progress((i + 1) / batch_size)
             time.sleep(sleep_time)
 
-        # Flush remaining
+        # flush remaining
         if buffer:
             supabase.table("ihsg_stocks").upsert(buffer).execute()
 
         st.success(f"""
-        ✅ Sync Complete!
+        ✅ Sync Complete
 
-        ✔ Success: {success}  
-        ❌ Failed: {failed}  
+        ✔ Success: {success}
+        ❌ Failed: {failed}
         ⏭ Skipped: {len(yf_tickers) - len(to_update)}
         """)
 
