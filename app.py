@@ -8,22 +8,22 @@ import time
 # ==========================================
 # CONFIG
 # ==========================================
-st.set_page_config(page_title="IHSG Hidden Gems Finder", page_icon="💎", layout="wide")
+st.set_page_config(page_title="IHSG Hidden Gems Finder", layout="wide")
 st.title("💎 IHSG Hidden Gems Finder")
 
 # ==========================================
-# SUPABASE (FIX: NO CACHE)
+# SUPABASE (NO CACHE = FIXED)
 # ==========================================
-def init_connection():
+def get_supabase():
     return create_client(
         st.secrets["SUPABASE_URL"],
         st.secrets["SUPABASE_KEY"]
     )
 
-supabase = init_connection()
+supabase = get_supabase()
 
 # ==========================================
-# FILE LOADER (CSV + XLSX)
+# FILE LOADER
 # ==========================================
 def load_file(file):
     if file.name.endswith(".csv"):
@@ -31,120 +31,118 @@ def load_file(file):
     elif file.name.endswith(".xlsx"):
         return pd.read_excel(file, engine="openpyxl")
     else:
-        st.error("Unsupported file format")
+        st.error("Upload CSV or XLSX only")
         st.stop()
 
 # ==========================================
-# DETECT TICKER COLUMN
+# FIND TICKER COLUMN
 # ==========================================
-def detect_ticker_column(df):
-    for col in df.columns:
-        if any(k in col.lower() for k in ["kode", "ticker", "symbol"]):
-            return col
+def get_ticker_col(df):
+    for c in df.columns:
+        if any(x in c.lower() for x in ["kode", "ticker", "symbol"]):
+            return c
     return None
 
 # ==========================================
-# CLEANING FUNCTIONS (CRITICAL)
+# CLEANERS (FIX BIGINT + NAN)
 # ==========================================
-def clean_float(val):
+def clean_float(v):
     try:
-        if val is None or pd.isna(val):
+        if v is None or pd.isna(v):
             return None
-        return float(val)
+        return float(v)
     except:
         return None
 
-def clean_int(val):
+def clean_int(v):
     try:
-        if val is None or pd.isna(val):
+        if v is None or pd.isna(v):
             return None
-        return int(float(val))
+        return int(float(v))
     except:
         return None
 
 # ==========================================
-# SAFE FETCH (FIXED YFINANCE)
+# FETCH FROM YAHOO (SAFE)
 # ==========================================
-def safe_fetch(ticker):
+def fetch_stock(t):
     try:
-        stock = yf.Ticker(ticker)
+        s = yf.Ticker(t)
 
-        # FAST (stable)
-        fast = stock.fast_info
+        fast = s.fast_info
         if fast and fast.get("lastPrice"):
             return {
                 "price": fast.get("lastPrice"),
                 "market_cap": fast.get("marketCap")
             }
 
-        # FALLBACK
-        info = stock.info
-        if info:
-            return {
-                "price": info.get("currentPrice") or info.get("regularMarketPrice"),
-                "market_cap": info.get("marketCap"),
-                "sector": info.get("sector"),
-                "name": info.get("longName"),
-                "pe": info.get("trailingPE"),
-                "pb": info.get("priceToBook"),
-                "de": info.get("debtToEquity")
-            }
+        info = s.info
+        if not info:
+            return None
 
-        return None
+        return {
+            "price": info.get("currentPrice") or info.get("regularMarketPrice"),
+            "market_cap": info.get("marketCap"),
+            "name": info.get("longName"),
+            "sector": info.get("sector"),
+            "pe": info.get("trailingPE"),
+            "pb": info.get("priceToBook"),
+            "de": info.get("debtToEquity"),
+        }
 
     except Exception as e:
         return {"error": str(e)}
 
 # ==========================================
-# FETCH DB
+# GET DB DATA
 # ==========================================
 @st.cache_data(ttl=600)
-def fetch_db():
+def get_db():
     res = supabase.table("ihsg_stocks").select("*").execute()
     return pd.DataFrame(res.data)
 
 # ==========================================
-# SMART FILTER
+# FILTER UPDATE (SMART)
 # ==========================================
-def filter_update(df_db, tickers):
+def need_update(df_db, tickers):
     now = datetime.utcnow()
-    threshold = now - timedelta(hours=24)
+    limit = now - timedelta(hours=24)
 
-    db_map = {}
+    last_map = {}
     if not df_db.empty:
         for _, r in df_db.iterrows():
-            db_map[r["ticker"]] = r.get("last_updated")
+            last_map[r["ticker"]] = r.get("last_updated")
 
-    result = []
+    out = []
     for t in tickers:
-        last = db_map.get(t)
+        last = last_map.get(t)
 
         if not last:
-            result.append(t)
+            out.append(t)
         else:
             try:
-                if datetime.fromisoformat(last) < threshold:
-                    result.append(t)
+                if datetime.fromisoformat(last) < limit:
+                    out.append(t)
             except:
-                result.append(t)
+                out.append(t)
 
-    return result
+    return out
 
 # ==========================================
 # SAFE UPSERT (NO CRASH)
 # ==========================================
-def safe_upsert(rows):
-    success, failed = 0, 0
+def upsert_rows(rows):
+    ok, fail = 0, 0
 
     for r in rows:
         try:
             supabase.table("ihsg_stocks").upsert(r).execute()
-            success += 1
+            ok += 1
         except Exception as e:
-            failed += 1
-            st.write("❌ DB error:", r["ticker"], str(e))
+            fail += 1
+            st.write("❌", r["ticker"], str(e))
 
-    return success, failed
+    return ok, fail
 
 # ==========================================
 # UI
@@ -155,9 +153,7 @@ tab1, tab2 = st.tabs(["📊 Screener", "⚙️ Updater"])
 # SCREENER
 # ==========================================
 with tab1:
-    st.subheader("📊 Screener")
-
-    df = fetch_db()
+    df = get_db()
 
     if df.empty:
         st.warning("No data yet")
@@ -174,17 +170,14 @@ with tab1:
 # UPDATER
 # ==========================================
 with tab2:
-    st.header("⚙️ Smart Sync")
-
     file = st.file_uploader("Upload IDX file", type=["csv", "xlsx"])
+    batch = st.slider("Batch", 5, 50, 20)
+    delay = st.slider("Delay", 0.5, 3.0, 1.0)
 
-    batch_size = st.slider("Batch size", 5, 50, 20)
-    delay = st.slider("Delay (sec)", 0.5, 3.0, 1.0)
-
-    if file and st.button("🚀 Start Sync"):
+    if file and st.button("Start Sync"):
 
         raw = load_file(file)
-        col = detect_ticker_column(raw)
+        col = get_ticker_col(raw)
 
         if not col:
             st.error("Ticker column not found")
@@ -193,54 +186,49 @@ with tab2:
         tickers = raw[col].dropna().astype(str).str.strip().tolist()
         yf_tickers = [f"{t}.JK" for t in tickers]
 
-        df_db = fetch_db()
-        to_update = filter_update(df_db, yf_tickers)
+        df_db = get_db()
+        update_list = need_update(df_db, yf_tickers)
 
-        st.info(f"Updating {len(to_update)} / {len(yf_tickers)} tickers")
+        st.info(f"Updating {len(update_list)} / {len(yf_tickers)}")
 
         buffer = []
-        total_success, total_failed = 0, 0
+        total_ok, total_fail = 0, 0
 
-        for i, t in enumerate(to_update[:batch_size]):
+        for t in update_list[:batch]:
 
-            st.write(f"Fetching {t}")
+            st.write("Fetching", t)
 
-            data = safe_fetch(t)
+            d = fetch_stock(t)
 
-            if not data or "error" in data:
-                total_failed += 1
+            if not d or "error" in d:
+                total_fail += 1
                 continue
 
             row = {
                 "ticker": t,
-                "company_name": data.get("name"),
-                "sector": data.get("sector"),
-                "market_cap": clean_int(data.get("market_cap")),
-                "pe_ratio": clean_float(data.get("pe")),
-                "pb_ratio": clean_float(data.get("pb")),
-                "debt_to_equity": clean_float(data.get("de")),
-                "current_price": clean_int(data.get("price")),
+                "company_name": d.get("name"),
+                "sector": d.get("sector"),
+                "market_cap": clean_int(d.get("market_cap")),
+                "pe_ratio": clean_float(d.get("pe")),
+                "pb_ratio": clean_float(d.get("pb")),
+                "debt_to_equity": clean_float(d.get("de")),
+                "current_price": clean_int(d.get("price")),
                 "last_updated": datetime.utcnow().isoformat()
             }
 
             buffer.append(row)
 
             if len(buffer) >= 10:
-                s, f = safe_upsert(buffer)
-                total_success += s
-                total_failed += f
+                ok, fail = upsert_rows(buffer)
+                total_ok += ok
+                total_fail += fail
                 buffer = []
 
             time.sleep(delay)
 
         if buffer:
-            s, f = safe_upsert(buffer)
-            total_success += s
-            total_failed += f
+            ok, fail = upsert_rows(buffer)
+            total_ok += ok
+            total_fail += fail
 
-        st.success(f"""
-        ✅ Done
-
-        ✔ Success: {total_success}  
-        ❌ Failed: {total_failed}  
-        """)
+        st.success(f"Done ✅ | Success: {total_ok} | Failed: {total_fail}")
