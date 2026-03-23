@@ -4,3 +4,4 @@ yfinance
 supabase
 requests
 urllib3
+openpyxl
