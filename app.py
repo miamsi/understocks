@@ -106,22 +106,22 @@ with tab_updater:
     st.header("⚙️ Sync Data from YFinance")
     st.write("Fetch data from YFinance and store it in Supabase to bypass rate limits.")
     
-    # File Uploader for the CSV
-    uploaded_file = st.file_uploader("Upload 'Daftar Saham' CSV File", type=['csv'])
+    # MODIFIED: Changed type to ['xlsx']
+    uploaded_file = st.file_uploader("Upload 'Daftar Saham' Excel File", type=['xlsx'])
     
     batch_size = st.number_input("Batch Size (How many to update at once?)", min_value=1, max_value=50, value=20, help="Keep this low to avoid YFinance IP bans.")
     sleep_time = st.slider("Delay between requests (Seconds)", 0.5, 5.0, 1.5, help="Pauses between tickers to trick YFinance anti-bot.")
     
     if uploaded_file and st.button("🚀 Start Scraping & Updating"):
         try:
-            # Load tickers
-            raw_data = pd.read_csv(uploaded_file)
+            # MODIFIED: Changed pd.read_csv to pd.read_excel
+            raw_data = pd.read_excel(uploaded_file)
             
             # Find the column containing the ticker symbols. 
             # Looking for 'Kode' based on typical IDX data format
             kode_col = [col for col in raw_data.columns if 'Kode' in col]
             if not kode_col:
-                st.error("Could not find the ticker column ('Kode') in the CSV.")
+                st.error("Could not find the ticker column ('Kode') in the Excel file.")
                 st.stop()
                 
             tickers = raw_data[kode_col[0]].dropna().astype(str).tolist()
