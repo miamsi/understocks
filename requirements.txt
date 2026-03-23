@@ -1,6 +1,6 @@
-streamlit==1.32.0
-pandas==2.2.1
-yfinance==0.2.37
-supabase==2.4.0
-requests==2.31.0
-urllib3==2.2.1
+streamlit
+pandas
+yfinance
+supabase
+requests
+urllib3
