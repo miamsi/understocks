@@ -27,7 +27,32 @@ def init_connection() -> Client:
 supabase = init_connection()
 
 # ==========================================
-# YFINANCE SESSION (RETRY SAFE)
+# FILE LOADER (FIXED XLSX + CSV SUPPORT)
+# ==========================================
+def load_file(uploaded_file):
+    if uploaded_file.name.endswith(".csv"):
+        return pd.read_csv(uploaded_file)
+    elif uploaded_file.name.endswith(".xlsx"):
+        return pd.read_excel(uploaded_file, engine="openpyxl")
+    else:
+        st.error("Unsupported file format. Use CSV or XLSX.")
+        st.stop()
+
+# ==========================================
+# ROBUST TICKER COLUMN DETECTION (FIXED)
+# ==========================================
+def detect_ticker_column(df):
+    possible_names = ["kode", "ticker", "symbol", "code"]
+
+    for col in df.columns:
+        for key in possible_names:
+            if key in col.lower():
+                return col
+
+    return None
+
+# ==========================================
+# YFINANCE SESSION
 # ==========================================
 def get_yf_session():
     session = requests.Session()
@@ -41,16 +66,15 @@ def get_yf_session():
     return session
 
 # ==========================================
-# SAFE FETCH FUNCTION (FIXES YF ERRORS)
+# SAFE FETCH (FIXES YF FAILURES)
 # ==========================================
 def safe_fetch_info(ticker, session):
     try:
         stock = yf.Ticker(ticker, session=session)
 
-        # Try full info first
         info = stock.info
 
-        # Fallback if broken
+        # fallback if broken
         if not info or "currentPrice" not in info:
             fast = stock.fast_info
             info = {
@@ -64,7 +88,7 @@ def safe_fetch_info(ticker, session):
         return None
 
 # ==========================================
-# GET EXISTING DB DATA
+# DATABASE FETCH
 # ==========================================
 @st.cache_data(ttl=600)
 def fetch_db():
@@ -72,7 +96,7 @@ def fetch_db():
     return pd.DataFrame(res.data)
 
 # ==========================================
-# SMART FILTER (KEY FEATURE 🔥)
+# SMART UPDATE FILTER (KEY FEATURE)
 # ==========================================
 def filter_tickers_to_update(df_db, tickers):
     now = datetime.now()
@@ -89,12 +113,12 @@ def filter_tickers_to_update(df_db, tickers):
         last = db_map.get(t)
 
         if not last:
-            to_update.append(t)  # new
+            to_update.append(t)
         else:
             try:
                 last_dt = datetime.fromisoformat(last)
                 if last_dt < threshold:
-                    to_update.append(t)  # stale
+                    to_update.append(t)
             except:
                 to_update.append(t)
 
@@ -109,14 +133,18 @@ tab1, tab2 = st.tabs(["📊 Screener", "⚙️ Updater"])
 # SCREENER
 # ==========================================
 with tab1:
+    st.subheader("📊 Stock Screener")
+
     df = fetch_db()
 
     if df.empty:
-        st.warning("No data yet.")
+        st.warning("No data available. Please run updater first.")
     else:
+        # Safe numeric conversion
         df["pe_ratio"] = pd.to_numeric(df["pe_ratio"], errors="coerce")
         df["pb_ratio"] = pd.to_numeric(df["pb_ratio"], errors="coerce")
 
+        # Value score
         df["value_score"] = df["pe_ratio"] * df["pb_ratio"]
 
         df = df.sort_values("value_score")
@@ -124,34 +152,42 @@ with tab1:
         st.dataframe(df, use_container_width=True)
 
 # ==========================================
-# UPDATER (FIXED VERSION)
+# UPDATER
 # ==========================================
 with tab2:
-    st.header("Smart Data Sync 🚀")
+    st.header("⚙️ Smart Data Sync")
 
-    uploaded_file = st.file_uploader("Upload CSV", type=["csv"])
+    uploaded_file = st.file_uploader(
+        "Upload IDX Stock List",
+        type=["csv", "xlsx"]
+    )
 
     batch_size = st.slider("Batch size", 5, 50, 20)
-    sleep_time = st.slider("Delay", 0.5, 3.0, 1.0)
+    sleep_time = st.slider("Delay between requests (sec)", 0.5, 3.0, 1.0)
 
-    if uploaded_file and st.button("Start Smart Sync"):
+    if uploaded_file and st.button("🚀 Start Smart Sync"):
 
-        raw = pd.read_csv(uploaded_file)
+        raw = load_file(uploaded_file)
 
-        kode_col = [c for c in raw.columns if "Kode" in c]
-        if not kode_col:
-            st.error("Column 'Kode' not found")
+        ticker_col = detect_ticker_column(raw)
+
+        if not ticker_col:
+            st.error("Could not detect ticker column (Kode/Ticker/Symbol)")
             st.stop()
 
-        tickers = raw[kode_col[0]].dropna().astype(str).tolist()
+        tickers = raw[ticker_col].dropna().astype(str).str.strip().tolist()
         yf_tickers = [f"{t}.JK" for t in tickers]
 
         df_db = fetch_db()
 
-        # 🔥 SMART FILTER
+        # SMART FILTER
         to_update = filter_tickers_to_update(df_db, yf_tickers)
 
-        st.info(f"Total: {len(yf_tickers)} | Need update: {len(to_update)}")
+        st.info(f"""
+        Total tickers: {len(yf_tickers)}
+        Need update: {len(to_update)}
+        Skipped (cached): {len(yf_tickers) - len(to_update)}
+        """)
 
         session = get_yf_session()
 
@@ -159,8 +195,11 @@ with tab2:
         buffer = []
 
         progress = st.progress(0)
+        status = st.empty()
 
         for i, ticker in enumerate(to_update[:batch_size]):
+
+            status.text(f"Fetching {ticker} ({i+1}/{batch_size})")
 
             info = safe_fetch_info(ticker, session)
 
@@ -184,7 +223,7 @@ with tab2:
                 buffer.append(data)
                 success += 1
 
-                # 🔥 BULK UPSERT every 10
+                # BULK UPSERT
                 if len(buffer) >= 10:
                     supabase.table("ihsg_stocks").upsert(buffer).execute()
                     buffer = []
@@ -195,15 +234,16 @@ with tab2:
             progress.progress((i + 1) / batch_size)
             time.sleep(sleep_time)
 
-        # flush remaining
+        # Flush remaining
         if buffer:
             supabase.table("ihsg_stocks").upsert(buffer).execute()
 
         st.success(f"""
-        ✅ Done!
-        Success: {success}
-        Failed: {failed}
-        Skipped: {len(yf_tickers) - len(to_update)}
+        ✅ Sync Complete!
+
+        ✔ Success: {success}  
+        ❌ Failed: {failed}  
+        ⏭ Skipped: {len(yf_tickers) - len(to_update)}
         """)
 
         fetch_db.clear()
