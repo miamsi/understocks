@@ -12,9 +12,8 @@ st.set_page_config(page_title="IHSG Hidden Gems Finder", page_icon="💎", layou
 st.title("💎 IHSG Hidden Gems Finder")
 
 # ==========================================
-# SUPABASE
+# SUPABASE (FIX: NO CACHE)
 # ==========================================
-@st.cache_resource
 def init_connection():
     return create_client(
         st.secrets["SUPABASE_URL"],
@@ -24,7 +23,7 @@ def init_connection():
 supabase = init_connection()
 
 # ==========================================
-# FILE LOADER
+# FILE LOADER (CSV + XLSX)
 # ==========================================
 def load_file(file):
     if file.name.endswith(".csv"):
@@ -70,6 +69,7 @@ def safe_fetch(ticker):
     try:
         stock = yf.Ticker(ticker)
 
+        # FAST (stable)
         fast = stock.fast_info
         if fast and fast.get("lastPrice"):
             return {
@@ -77,6 +77,7 @@ def safe_fetch(ticker):
                 "market_cap": fast.get("marketCap")
             }
 
+        # FALLBACK
         info = stock.info
         if info:
             return {
@@ -103,10 +104,10 @@ def fetch_db():
     return pd.DataFrame(res.data)
 
 # ==========================================
-# FILTER (SMART UPDATE)
+# SMART FILTER
 # ==========================================
 def filter_update(df_db, tickers):
-    now = datetime.now()
+    now = datetime.utcnow()
     threshold = now - timedelta(hours=24)
 
     db_map = {}
@@ -117,6 +118,7 @@ def filter_update(df_db, tickers):
     result = []
     for t in tickers:
         last = db_map.get(t)
+
         if not last:
             result.append(t)
         else:
@@ -153,6 +155,8 @@ tab1, tab2 = st.tabs(["📊 Screener", "⚙️ Updater"])
 # SCREENER
 # ==========================================
 with tab1:
+    st.subheader("📊 Screener")
+
     df = fetch_db()
 
     if df.empty:
@@ -170,12 +174,14 @@ with tab1:
 # UPDATER
 # ==========================================
 with tab2:
+    st.header("⚙️ Smart Sync")
+
     file = st.file_uploader("Upload IDX file", type=["csv", "xlsx"])
 
     batch_size = st.slider("Batch size", 5, 50, 20)
-    delay = st.slider("Delay", 0.5, 3.0, 1.0)
+    delay = st.slider("Delay (sec)", 0.5, 3.0, 1.0)
 
-    if file and st.button("Start Sync"):
+    if file and st.button("🚀 Start Sync"):
 
         raw = load_file(file)
         col = detect_ticker_column(raw)
@@ -190,7 +196,7 @@ with tab2:
         df_db = fetch_db()
         to_update = filter_update(df_db, yf_tickers)
 
-        st.info(f"Update: {len(to_update)} / {len(yf_tickers)}")
+        st.info(f"Updating {len(to_update)} / {len(yf_tickers)} tickers")
 
         buffer = []
         total_success, total_failed = 0, 0
@@ -214,7 +220,7 @@ with tab2:
                 "pb_ratio": clean_float(data.get("pb")),
                 "debt_to_equity": clean_float(data.get("de")),
                 "current_price": clean_int(data.get("price")),
-                "last_updated": datetime.now().isoformat()
+                "last_updated": datetime.utcnow().isoformat()
             }
 
             buffer.append(row)
@@ -235,6 +241,6 @@ with tab2:
         st.success(f"""
         ✅ Done
 
-        Success: {total_success}  
-        Failed: {total_failed}  
+        ✔ Success: {total_success}  
+        ❌ Failed: {total_failed}  
         """)
